@@ -1,0 +1,1 @@
+./aut k aa aa ss ss dd dd ff ff gg gg  # prikaz: source spusteni.txt

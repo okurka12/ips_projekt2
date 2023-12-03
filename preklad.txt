@@ -1,0 +1,7 @@
+# pouzit prikazem `source preklad.txt`
+
+# takto se bude prekladat u nich
+#gcc aut.c -o aut -lpthread
+
+# takto budu prekladat pri vyvoji
+gcc --std=c11 -lpthread -Wall -Wextra -pedantic -g -o aut aut.c

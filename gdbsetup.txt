@@ -1,0 +1,1 @@
+run 3 "Ahoj1" 2 "kolem" 1 "Hradu" 3 < zkouska.txt
