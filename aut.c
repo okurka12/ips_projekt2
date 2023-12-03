@@ -11,6 +11,9 @@
 /* toto kdyby tady nebylo tak si prekladac stezuje ze usleep neexistuje */
 #define _DEFAULT_SOURCE
 
+/* toto tu je protoze mi pada nejaky assert v mtx_lock */
+#define NDEBUG
+
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -22,7 +25,7 @@
 /*                          0  1         2    3     4    5       6    7       */
 #define usage_msg "Pouziti: %s MIN_SCORE STR1 SC1 [ STR2 SC2 ] [ STR3 SC3 ] ..."
 
-#define MAX_LINE_LENGTH 8192
+// #define MAX_LINE_LENGTH 8192
 
 /* pred odevzdanim oboji dat na 0 */
 #define DEBUG_LOGS 0
@@ -71,7 +74,9 @@ mtx_t line_mtx;
 char *line;
 
 
-/* vrati jestli je `needle` v `heystack` */
+/**
+ * vrati jestli je `needle` v `heystack`
+ implementovano primitivnim automatem */
 bool my_strstr(char *heystack, char *needle) {
 
     unsigned int l1 = strlen(heystack);
@@ -92,24 +97,6 @@ bool my_strstr(char *heystack, char *needle) {
     }
 
     return state == l2;
-}
-
-
-char *read_line() {
-    char *line = (char *)malloc(sizeof(char) * MAX_LINE_LENGTH);
-    if (line == NULL) return NULL;
-    line[0] = '\0';
-
-    fgets(line, MAX_LINE_LENGTH, stdin);
-
-    for (unsigned int i = 0; i < MAX_LINE_LENGTH; i++) {
-        if (line[i] == '\n') {
-            line[i] = '\0';
-            break;
-        }
-    }
-
-    return line;
 }
 
 /**
@@ -389,7 +376,7 @@ int main(int argc, char **argv) {
 
     /* spusteni vlaken */
     for (unsigned int i = 0; i < thr_cnt; i++) {
-        mtx_init(done_mtx_arr + i, mtx_plain);
+        mtx_init(done_mtx_arr + i, mtx_recursive);
         mtx_lock(done_mtx_arr + i);
         thrd_create(thrd_ids + i, child, ids + i);
         uslp();
@@ -398,38 +385,53 @@ int main(int argc, char **argv) {
     /* iterace pres radky */
     while (!feof(stdin)) {
 
-        mtx_lock(&line_mtx);
-        line = read_line();
+        /* nacteni radku */
+        mtx_lock(&line_mtx);        
+        size_t getline_len = 0;  // toto pro getline aby naalokovala buffer
+        line = NULL;  // toto taky pro getline je potreba nastavit
+        getline(&line, &getline_len, stdin);
+        if (line == NULL) {
+            perror("getline");
+            fprintf(stderr, "chyba alokace getline, abort\n");
+            return 1;
+        }
         log("main: radek '%s'\n", line);
         mtx_unlock(&line_mtx);
 
+        /* spustit paralelne vsechna vlakna */
         unlock_all(thr_cnt);
-        lock_all(thr_cnt);
-        log("main: vlakna neaktivni, skore %d\n", score);
 
+        /* pockat nez vsechna vlakna dokonci praci*/
+        lock_all(thr_cnt);
+        log("main: vlakna hotova, skore %d\n", score);
+
+        /* podivat se jestli bylo skore dostatecne */
         mtx_lock(&score_mtx);
         if (score >= min_scr) {
-            puts(line);
+            printf(line);
         }
         score = 0;
         mtx_unlock(&score_mtx);
 
+        /* uvolnit buffer radku */
         mtx_lock(&line_mtx);
         free(line);
         line = "";
         mtx_unlock(&line_mtx);
 
+        /* zvysit pocitadlo nactenych radku */
         mtx_lock(&line_no_mtx);
         line_no++;
         mtx_unlock(&line_no_mtx);
     }
+
+    /* tohle nevim jestli muzu smazat radsi to tady necham */
     unlock_all(thr_cnt);
 
-    /* skoncit */
+    /* skoncit (nastavit `finished` na true) */
     log("main: snazim se skoncit%s\n", "");
     mtx_lock(&finished_mtx);
     finished = true;
-    
     mtx_lock(&line_mtx);
     line = "";
     mtx_unlock(&line_mtx);
@@ -441,7 +443,7 @@ int main(int argc, char **argv) {
     for (unsigned int i = 0; i < thr_cnt; i++) {
         thrd_join(thrd_ids[i], &rcode);
 
-        /* pokud vlakno skoncilo chybou tak se na ostatni ani neceka */
+        /* pokud nejake vlakno skoncilo chybou tak se na ostatni ani neceka */
         if (rcode != 0) return rcode;
     }
 
