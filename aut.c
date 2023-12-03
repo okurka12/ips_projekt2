@@ -25,8 +25,8 @@
 #define MAX_LINE_LENGTH 8192
 
 /* pred odevzdanim oboji dat na 0 */
-#define DEBUG_LOGS 1
-#define DEBUG_USLEEP 1
+#define DEBUG_LOGS 0
+#define DEBUG_USLEEP 0
 
 
 
@@ -43,6 +43,10 @@
 #endif  // if DEBUG_USLEEP
 
 /* -------------------------- globalni promenne ----------------------------- */
+
+unsigned int line_no;
+mtx_t line_no_mtx;
+
 mtx_t finished_mtx;
 bool finished;
 
@@ -51,21 +55,50 @@ mtx_t score_mtx;
 
 int score;
 
-/* pole pro zamky signalizujici, ze vlakno je hotove */
+/* pole pro zamky omezujici cinnost vlakna, zamykaji taky polozky v done_arr */
 mtx_t *done_mtx_arr;
+
+/* sem vlakna ulozi jestli jsou hotova*/
+bool *done_arr;
 
 /* argv ktere dostal main */
 char **argv_global;
 
-/**
- * aktualni radek
- * @note nema zamek protoze vlakna z nej budou jenom cist
-*/
+/* zamek pro radek */
+mtx_t line_mtx;
+
+/* aktualni radek */
 char *line;
+
+
+/* vrati jestli je `needle` v `heystack` */
+bool my_strstr(char *heystack, char *needle) {
+
+    unsigned int l1 = strlen(heystack);
+    unsigned int l2 = strlen(needle);
+    
+    /* stav - kolik pismenek se rovnalo */
+    unsigned int state = 0;
+
+    for (unsigned int i = 0; i < l1; i++) {
+        if (heystack[i] == needle[state]) {
+            state++;
+        } else if (heystack[i] == needle[0]) {
+            state = 1;
+        } else {
+            state = 0;
+        }
+        if (state == l2) return true;
+    }
+
+    return state == l2;
+}
+
 
 char *read_line() {
     char *line = (char *)malloc(sizeof(char) * MAX_LINE_LENGTH);
     if (line == NULL) return NULL;
+    line[0] = '\0';
 
     fgets(line, MAX_LINE_LENGTH, stdin);
 
@@ -180,8 +213,19 @@ char *get_sc(char **argv, unsigned int i) {
     return argv[idx];
 }
 
+/* makro pro child - kontroluje na jestli uz neni finished true */
+#define check_if_finished \
+/* log("vlakno %u jde zkontrolovt finish (radek %d)\n", id, __LINE__); */ \
+mtx_lock(&finished_mtx); \
+uslp(); \
+if (finished) { \
+    mtx_unlock(&finished_mtx); \
+    goto return_ok; \
+} \
+mtx_unlock(&finished_mtx)
+
 /* automat ktery se spusti ve vlaknu */
-int fsm(void *arg) {
+int child(void *arg) {
 
     /* zjistit kdo jsem */
     uslp();
@@ -200,32 +244,48 @@ int fsm(void *arg) {
     /* nastaveni ukazovatka na str-i */
     char *str = get_str(argv_global, id);
 
-    while (true) {
+    unsigned int line_no_local = 0;
 
-        /* podivat se jestli jsme neskoncili uz */
-        mtx_lock(&finished_mtx);
-        if (finished) {
-            log("%s", "finished=true\n");
-            mtx_unlock(&finished_mtx);
-            goto return_ok;
+    while (true) {
+        check_if_finished;
+
+        /* tady ceka nez ostatni dokonci praci */
+        mtx_lock(&line_no_mtx);
+        uslp();
+        if (line_no_local > line_no) {
+            mtx_unlock(&line_no_mtx);
+            mtx_unlock(done_mtx_arr + id);
+            log("vlakno %u ceka na ostatni\n", id);
+            continue;
         }
-        mtx_unlock(&finished_mtx);
+        mtx_unlock(&line_no_mtx);
 
         /* zacit pracovat */
+        log("vlakno %u by chtelo jit pracovat\n", id);
         mtx_lock(done_mtx_arr + id);
         log("vlakno %u pracuje\n", id);
+        uslp();
 
-        /* naivni pristup k hledani podretezce */
-        for (unsigned int i = 0; line[i] != '\0'; i++) {
-            if (strcmp(line + i, str) == 0) {
-                mtx_lock(&score_mtx);
-                score += scr;
-                mtx_unlock(&score_mtx);
-            }
+
+        mtx_lock(&line_mtx);
+        if (strstr(line, str) != NULL) {
+
+            log("vlakno %u naslo '%s' pridava %d ke skore\n", id, str, scr);
+            mtx_lock(&score_mtx);
+            score += scr;
+            mtx_unlock(&score_mtx);
+
+        } else {
+            log("vlakno %u nenaslo '%s'\n", id, str);
         }
+        line_no_local++;
+        done_arr[id] = true;
+        mtx_unlock(&line_mtx);
 
         /* skoncit s praci */
+        log("vlakno %u dokoncilo praci\n", id);
         mtx_unlock(done_mtx_arr + id);
+
         uslp();
     }
 
@@ -244,7 +304,18 @@ int fsm(void *arg) {
  */
 void lock_all(unsigned int thr_cnt) {
     for (unsigned int i = 0; i < thr_cnt; i++) {
-        mtx_lock(done_mtx_arr + i);
+        while (true) {
+            /* zkusi zamknout ale pokud vlakno neskoncilo tak zase odemkne */
+            mtx_lock(done_mtx_arr + i);
+            log("main: zamykam vlakno %u\n", i);
+            if (done_arr[i] == false) {
+                mtx_unlock(done_mtx_arr + i);
+                log("main: vlakno %u jeste neni hotove, odemykam\n", i);
+            } else {
+                done_arr[i] = false;
+                break;
+            }
+        }
     }
 }
 
@@ -253,9 +324,12 @@ void lock_all(unsigned int thr_cnt) {
  */
 void unlock_all(unsigned int thr_cnt) {
     for (unsigned int i = 0; i < thr_cnt; i++) {
+        log("odemykam vlakno %u\n", i);
         mtx_unlock(done_mtx_arr + i);
     }
 }
+
+/*############################################################################*/
 
 /* makro pro `main()` - zkontroluje `p` jestli neni NULL a kdyztak vrati 1 */
 #define check(p) if ((p) == NULL) do {\
@@ -280,11 +354,14 @@ int main(int argc, char **argv) {
         fprintf(stderr, "%s neni platne minimalni skore\n", argv[1]);
     }
 
-    mtx_init(&score_mtx, mtx_plain);
 
-    /* inicializace globalni promenne `finished` */
+    /* inicializace globalnich zamku */
     mtx_init(&finished_mtx, mtx_plain);
-    mtx_init(&finished_mtx, mtx_plain);
+    mtx_init(&score_mtx, mtx_plain);
+    mtx_init(&line_mtx, mtx_plain);
+    mtx_init(&line_no_mtx, mtx_plain);
+
+    /* inicializace finished */
     mtx_lock(&finished_mtx);
     finished = false;
     mtx_unlock(&finished_mtx);
@@ -297,13 +374,15 @@ int main(int argc, char **argv) {
     check(done_mtx_arr);
     thrd_t *thrd_ids = alloc_thrd_arr(thr_cnt);
     check(thrd_ids);
+    done_arr = alloc_bool_arr(thr_cnt);
+    check(done_arr);
 
        
     /**
      * id pro predani vlaknum jako parametr
      * 
-     * @note proc je tohle nutne? protoze promanna `i` ve for cyklu se muze zmenit 
-     * nez si ji precte vytvorene vlakno
+     * @note proc je tohle nutne? protoze promanna `i` ve for cyklu se muze
+     * zmenit nez si ji precte vytvorene vlakno
      */
     unsigned int *ids = alloc_unsigned_arr(thr_cnt);
     check(ids);
@@ -312,19 +391,37 @@ int main(int argc, char **argv) {
     for (unsigned int i = 0; i < thr_cnt; i++) {
         mtx_init(done_mtx_arr + i, mtx_plain);
         mtx_lock(done_mtx_arr + i);
-        thrd_create(thrd_ids + i, fsm, ids + i);
+        thrd_create(thrd_ids + i, child, ids + i);
         uslp();
     }
 
+    /* iterace pres radky */
     while (!feof(stdin)) {
+
+        mtx_lock(&line_mtx);
         line = read_line();
         log("main: radek '%s'\n", line);
+        mtx_unlock(&line_mtx);
+
         unlock_all(thr_cnt);
         lock_all(thr_cnt);
-        log("main: vlakna neaktivni\n%s", "");
+        log("main: vlakna neaktivni, skore %d\n", score);
+
+        mtx_lock(&score_mtx);
         if (score >= min_scr) {
             puts(line);
         }
+        score = 0;
+        mtx_unlock(&score_mtx);
+
+        mtx_lock(&line_mtx);
+        free(line);
+        line = "";
+        mtx_unlock(&line_mtx);
+
+        mtx_lock(&line_no_mtx);
+        line_no++;
+        mtx_unlock(&line_no_mtx);
     }
     unlock_all(thr_cnt);
 
@@ -332,6 +429,10 @@ int main(int argc, char **argv) {
     log("main: snazim se skoncit%s\n", "");
     mtx_lock(&finished_mtx);
     finished = true;
+    
+    mtx_lock(&line_mtx);
+    line = "";
+    mtx_unlock(&line_mtx);
     mtx_unlock(&finished_mtx);
 
     /* pockani na vlakna */
