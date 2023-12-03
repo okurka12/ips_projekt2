@@ -255,7 +255,7 @@ int child(void *arg) {
 
 
         mtx_lock(&line_mtx);
-        if (strstr(line, str) != NULL) {
+        if (my_strstr(line, str)) {
 
             log("vlakno %u naslo '%s' pridava %d ke skore\n", id, str, scr);
             mtx_lock(&score_mtx);
@@ -348,7 +348,7 @@ int main(int argc, char **argv) {
     mtx_init(&line_mtx, mtx_plain);
     mtx_init(&line_no_mtx, mtx_plain);
 
-    /* inicializace finished */
+    /* inicializace promenne finished */
     mtx_lock(&finished_mtx);
     finished = false;
     mtx_unlock(&finished_mtx);
@@ -374,7 +374,10 @@ int main(int argc, char **argv) {
     unsigned int *ids = alloc_unsigned_arr(thr_cnt);
     check(ids);
 
-    /* spusteni vlaken */
+    /**
+     * spusteni vlaken a inicializace jejich individualnich zamku
+     * v globalnim poli done_mtx_arr 
+     */
     for (unsigned int i = 0; i < thr_cnt; i++) {
         mtx_init(done_mtx_arr + i, mtx_recursive);
         mtx_lock(done_mtx_arr + i);
@@ -403,7 +406,7 @@ int main(int argc, char **argv) {
 
         /* pockat nez vsechna vlakna dokonci praci*/
         lock_all(thr_cnt);
-        log("main: vlakna hotova, skore %d\n", score);
+        log("main: vsechna vlakna hotova, skore %d\n", score);
 
         /* podivat se jestli bylo skore dostatecne */
         mtx_lock(&score_mtx);
@@ -452,5 +455,6 @@ int main(int argc, char **argv) {
     free(done_mtx_arr);
     free(thrd_ids);
     free(ids);
+    free(done_arr);
 
 }
